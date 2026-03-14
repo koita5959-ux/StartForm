@@ -1,0 +1,11 @@
+bin/
+obj/
+publish/
+installer_output/
+artifacts/
+.vs/
+*.user
+*.suo
+*.pdb
+Thumbs.db
+Desktop.ini

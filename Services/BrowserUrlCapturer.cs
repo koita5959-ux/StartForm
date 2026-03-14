@@ -141,20 +141,48 @@ namespace StartForm.Services
         }
 
         /// <summary>
-        /// URLのスキームを補完する（https:// が省略されている場合）
+        /// URLのスキームを補完する。
+        /// ローカルファイルパス（ドライブレター）→ file:/// スキームを付与。
+        /// ポート番号から http / https を推定する:
+        ///   - 非標準ポート（443以外）が明示されている → http://
+        ///   - ポート指定なし or :443 → https://
         /// </summary>
         private static string NormalizeUrl(string url)
         {
             url = url.Trim();
 
-            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
-                !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase) &&
-                !url.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+            // スキームが既にある場合はそのまま
+            if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                url.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                url.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
             {
-                url = "https://" + url;
+                return url;
             }
 
-            return url;
+            // ローカルファイルパス（ドライブレター）→ file:/// スキームを付与
+            // Chromeは file:///C:/... を "C:/Users/..." のようにスキームなしで表示する
+            if (url.Length >= 3 && char.IsLetter(url[0]) && url[1] == ':' && (url[2] == '/' || url[2] == '\\'))
+            {
+                return "file:///" + url;
+            }
+
+            // ホスト部分からポート番号を判定
+            // 形式: "host:port/path" or "host/path" or "host"
+            string hostPart = url.Split('/')[0];
+            int colonIndex = hostPart.LastIndexOf(':');
+
+            if (colonIndex >= 0)
+            {
+                string portStr = hostPart[(colonIndex + 1)..];
+                if (int.TryParse(portStr, out int port) && port != 443)
+                {
+                    // 非標準ポート（443以外）が明示 → httpと推定
+                    return "http://" + url;
+                }
+            }
+
+            // ポート指定なし or :443 → https
+            return "https://" + url;
         }
 
         /// <summary>

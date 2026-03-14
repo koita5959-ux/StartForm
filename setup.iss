@@ -2,7 +2,7 @@
 ; 便利アプリシリーズ 第二弾
 
 #define MyAppName "StartForm"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.04"
 #define MyAppPublisher "便利アプリシリーズ"
 #define MyAppExeName "StartForm.exe"
 #define MyAppDescription "自分が決めた作業環境を、いつでもワンアクションで整える"
@@ -14,8 +14,8 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
-OutputDir=installer_output
-OutputBaseFilename=StartForm_Setup_1.0.0
+OutputDir=installer
+OutputBaseFilename=StartForm_Setup_v{#MyAppVersion}
 SetupIconFile=I.ico
 UninstallDisplayIcon={app}\StartForm.exe
 Compression=lzma

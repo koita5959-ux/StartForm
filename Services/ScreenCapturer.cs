@@ -220,8 +220,9 @@ namespace StartForm.Services
         /// <summary>
         /// エクスプローラーウィンドウから開いているフォルダのパスを取得する
         /// Shell.Application COMを使用
+        /// ProfileExecutor からも参照するため internal
         /// </summary>
-        private static string? GetExplorerFolderPath(IntPtr hWnd)
+        internal static string? GetExplorerFolderPath(IntPtr hWnd)
         {
             try
             {

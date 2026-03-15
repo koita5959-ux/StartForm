@@ -705,6 +705,112 @@ namespace StartForm.Services
             return UnsupportedStableApps.Contains(entry.ProcessName, StringComparer.OrdinalIgnoreCase);
         }
 
+        /// <summary>
+        /// 既に開いているウィンドウの中から、エントリのファイル/URL/フォルダに一致するものを探す。
+        /// 見つかれば再利用し、重複起動を防ぐ。
+        ///
+        /// 安全方針：
+        ///   - マッチしない場合は従来通り新規起動（壊れない）
+        ///   - 誤マッチ（別ウィンドウを奪う）を絶対に避ける
+        ///   - Explorer: フォルダパス完全一致（COM経由、信頼性高い）
+        ///   - 一般アプリ: WMIコマンドラインからファイルパスを抽出し完全一致
+        ///   - Chrome/Edge: 対象外（UI Automationが不安定なため新規起動に回す）
+        ///   - タイトル部分一致: 対象外（誤マッチリスクが高いため）
+        /// </summary>
+        private static IntPtr FindExistingMatchingWindow(
+            ProfileEntry entry,
+            Dictionary<uint, string> commandLineCache,
+            HashSet<IntPtr> alreadyClaimed)
+        {
+            try
+            {
+                var handles = GetWindowHandlesByProcessName(entry.ProcessName);
+                handles.ExceptWith(alreadyClaimed);
+                if (handles.Count == 0) return IntPtr.Zero;
+
+                string? targetFile = entry.FilePath;
+                if (string.IsNullOrEmpty(targetFile) && entry.FilePaths?.Length > 0)
+                    targetFile = entry.FilePaths[0];
+
+                // ファイル/URL指定がない場合はマッチングできない → 新規起動に回す
+                if (string.IsNullOrEmpty(targetFile))
+                    return IntPtr.Zero;
+
+                bool isExplorer = entry.ProcessName.Equals("explorer", StringComparison.OrdinalIgnoreCase);
+
+                // Chrome/Edge はUI Automationが不安定なため、マッチング対象外とする
+                // （従来通り新規ウィンドウを起動する）
+                bool isChromeLike = entry.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase) ||
+                                    entry.ProcessName.Equals("msedge", StringComparison.OrdinalIgnoreCase);
+                if (isChromeLike)
+                    return IntPtr.Zero;
+
+                // Explorer: Shell.Application COM でフォルダパス完全一致
+                if (isExplorer)
+                {
+                    foreach (var hWnd in handles)
+                    {
+                        var folderPath = ScreenCapturer.GetExplorerFolderPath(hWnd);
+                        if (!string.IsNullOrEmpty(folderPath) &&
+                            NormalizeFolderPath(folderPath).Equals(
+                                NormalizeFolderPath(targetFile), StringComparison.OrdinalIgnoreCase))
+                        {
+                            ExecutionLogger.Info(
+                                $"Explorer folder match found hwnd=0x{hWnd.ToInt64():X} folder=\"{folderPath}\"");
+                            return hWnd;
+                        }
+                    }
+                    return IntPtr.Zero;
+                }
+
+                // 一般アプリ（Acrobat, LibreOffice等）:
+                // WMIコマンドラインからファイルパスを抽出し、完全一致で照合する
+                foreach (var hWnd in handles)
+                {
+                    NativeMethods.GetWindowThreadProcessId(hWnd, out uint processId);
+
+                    if (!commandLineCache.TryGetValue(processId, out var cmdLine))
+                        continue;
+
+                    // プロセスパスを使ってコマンドラインからファイルパスを抽出
+                    string processPath = string.Empty;
+                    try
+                    {
+                        var proc = Process.GetProcessById((int)processId);
+                        processPath = proc.MainModule?.FileName ?? string.Empty;
+                    }
+                    catch { continue; }
+
+                    var extractedPath = CommandLineParser.ExtractFilePath(cmdLine, processPath);
+                    if (string.IsNullOrEmpty(extractedPath))
+                        continue;
+
+                    // 抽出したファイルパスとエントリのファイルパスを完全一致で比較
+                    // （File.Exists済みのフルパス同士なので信頼性が高い）
+                    if (extractedPath.Equals(targetFile, StringComparison.OrdinalIgnoreCase) ||
+                        extractedPath.Equals(Path.GetFullPath(targetFile), StringComparison.OrdinalIgnoreCase))
+                    {
+                        ExecutionLogger.Info(
+                            $"CommandLine file path match found hwnd=0x{hWnd.ToInt64():X} file=\"{extractedPath}\"");
+                        return hWnd;
+                    }
+                }
+
+                return IntPtr.Zero;
+            }
+            catch (Exception ex)
+            {
+                // マッチング処理で予期しないエラーが発生しても、従来通り新規起動に回す（壊れない）
+                ExecutionLogger.Warn($"FindExistingMatchingWindow failed, falling back to new launch: {ex.Message}");
+                return IntPtr.Zero;
+            }
+        }
+
+        private static string NormalizeFolderPath(string path)
+        {
+            return path.TrimEnd('\\', '/');
+        }
+
         // ShouldSkipEntry は「配置もスキップ」する場合のみ true にする
         // Chrome/Edgeは新規ウィンドウで配置するため false のまま
         private static bool ShouldSkipEntry(ProfileEntry entry)
@@ -846,7 +952,11 @@ namespace StartForm.Services
             var runtimeSkippedEntries = new HashSet<ProfileEntry>();
             var processHandleAssignments = new Dictionary<string, Dictionary<ProfileEntry, IntPtr>>(StringComparer.OrdinalIgnoreCase);
             var claimedNewHandles = new HashSet<IntPtr>();
+            var reusedHandles = new HashSet<IntPtr>(); // 既存ウィンドウ再利用で確保済みのハンドル
             var reapplyList = new List<ReapplyAction>(); // Moved declaration here
+
+            // WMIコマンドラインを一括取得（既存ウィンドウのファイルパスマッチングに使用）
+            var commandLineCache = CommandLineParser.GetAllCommandLines();
 
             ExecutionLogger.Info(
                 $"ExecuteAsync start profile=\"{profile.ProfileName}\" activeEntries={activeEntries.Count} log={ExecutionLogger.LogFilePath}");
@@ -898,6 +1008,20 @@ namespace StartForm.Services
 
                 if (ShouldPreferNewWindow(entry))
                 {
+                    // 既に同じファイル/URL/フォルダが開かれているウィンドウがあれば再利用する
+                    var matchingHandle = FindExistingMatchingWindow(entry, commandLineCache, reusedHandles);
+                    if (matchingHandle != IntPtr.Zero)
+                    {
+                        NativeMethods.GetWindowThreadProcessId(matchingHandle, out uint matchedPid);
+                        Process? matchedProcess = null;
+                        try { matchedProcess = Process.GetProcessById((int)matchedPid); } catch { }
+                        entryHandles[entry] = (matchedProcess, matchingHandle);
+                        reusedHandles.Add(matchingHandle);
+                        ExecutionLogger.Info(
+                            $"Existing window reused (skip launch) {DescribeEntry(entry)} hwnd=0x{matchingHandle.ToInt64():X}");
+                        continue;
+                    }
+
                     entryHandles[entry] = (null, IntPtr.Zero);
                     ExecutionLogger.Info($"Entry will launch as new window {DescribeEntry(entry)}");
                     continue;

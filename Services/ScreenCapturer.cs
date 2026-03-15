@@ -131,6 +131,14 @@ namespace StartForm.Services
             if (string.IsNullOrWhiteSpace(commandLine))
                 return null;
 
+            return GetLibreOfficeDocumentPathFromCommandLine(commandLine);
+        }
+
+        private static string? GetLibreOfficeDocumentPathFromCommandLine(string commandLine)
+        {
+            if (string.IsNullOrWhiteSpace(commandLine))
+                return null;
+
             var args = SplitCommandLineArguments(commandLine);
             foreach (var arg in args.Skip(1))
             {
@@ -291,6 +299,8 @@ namespace StartForm.Services
                 "winword"  => new[] { " - Word" },
                 "powerpnt" => new[] { " - PowerPoint" },
                 "emeditor" => new[] { " - EmEditor" },
+                "acrobat"  => new[] { " - Adobe Acrobat Pro", " - Adobe Acrobat", " - Adobe Acrobat Reader", " - Adobe Reader" },
+                "acrord32" => new[] { " - Adobe Acrobat Reader", " - Adobe Reader", " - Adobe Acrobat" },
                 _ => null
             };
 
@@ -315,6 +325,10 @@ namespace StartForm.Services
             var entries = new List<ProfileEntry>();
             var screens = Screen.AllScreens.OrderBy(s => s.Bounds.X).ToArray();
             ExecutionLogger.Info($"CaptureCurrentWindows start screens={screens.Length}");
+
+            // WMIコマンドラインを1回だけ一括取得（全ウィンドウ処理で使い回す）
+            var commandLineCache = CommandLineParser.GetAllCommandLines();
+            ExecutionLogger.Info($"WMI CommandLine一括取得完了 count={commandLineCache.Count}");
 
             // Chrome/Edgeのプロファイルマップを1回だけロード（全ウィンドウ処理で使い回す）
             var chromeProfileMap = ChromeProfileDetector.LoadProfileMap();
@@ -475,12 +489,31 @@ namespace StartForm.Services
                 else if (process.ProcessName.Equals("soffice", StringComparison.OrdinalIgnoreCase) ||
                          process.ProcessName.Equals("soffice.bin", StringComparison.OrdinalIgnoreCase))
                 {
-                    filePath = GetLibreOfficeDocumentPath(process);
+                    // LibreOffice: キャッシュ済みコマンドラインから文書パスを抽出
+                    if (commandLineCache.TryGetValue((uint)process.Id, out var loCmd))
+                    {
+                        filePath = GetLibreOfficeDocumentPathFromCommandLine(loCmd);
+                    }
+                    if (string.IsNullOrEmpty(filePath))
+                    {
+                        filePath = GetLibreOfficeDocumentPath(process);
+                    }
                 }
                 else
                 {
                     string windowTitle = titleBuilder.ToString();
-                    filePath = GetTitleFilePath(process.ProcessName, windowTitle);
+
+                    // 優先1: WMIコマンドラインからファイルパスを抽出（フルパス取得可能）
+                    if (commandLineCache.TryGetValue((uint)process.Id, out var cmdLine))
+                    {
+                        filePath = CommandLineParser.ExtractFilePath(cmdLine, processPath);
+                    }
+
+                    // 優先2: タイトルバーからファイル名を取得（フォールバック）
+                    if (string.IsNullOrEmpty(filePath))
+                    {
+                        filePath = GetTitleFilePath(process.ProcessName, windowTitle);
+                    }
                 }
 
                 // explorerはフォルダパスが取れた場合のみ追加

@@ -20,6 +20,13 @@
     <Copyright>Copyright © 2026</Copyright>
   </PropertyGroup>
   <ItemGroup>
+    <!-- ReDesktopは参考資料として配置しているだけ。ビルド対象から除外する -->
+    <Compile Remove="ReDesktop\**" />
+    <Content Remove="ReDesktop\**" />
+    <EmbeddedResource Remove="ReDesktop\**" />
+    <None Remove="ReDesktop\**" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="System.Management" Version="10.0.3" />
   </ItemGroup>
   <ItemGroup>
